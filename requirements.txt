@@ -1,0 +1,33 @@
+# Core dependencies for the Migration Agent
+
+# LangChain and related packages
+langchain>=0.3,<0.4
+langchain-core>=0.3,<0.4
+langchain-openai>=0.3,<0.4
+langgraph>=0.2.20,<0.3
+
+# OpenAI API client
+openai==2.1.0
+
+# Data validation and models
+pydantic==2.9.2
+pydantic-core==2.23.4
+
+# Environment variables
+python-dotenv==1.0.1
+
+# Type extensions
+typing-extensions==4.12.2
+
+# Diff and patch utilities (for agent.py)
+diff-match-patch==20230430
+
+# Standard library enhancements
+dataclasses-json==0.6.7
+
+# Optional: For better JSON handling
+orjson==3.10.7
+
+# Optional: For async support
+aiohttp==3.10.10
+
