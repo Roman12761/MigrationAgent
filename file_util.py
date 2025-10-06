@@ -4,7 +4,7 @@ from typing import List
 from models import FileWithContent
 
 
-def read_and_describe_files(parentFolder: str) -> List[FileWithContent]:
+def read_and_describe_files(parent_folder: str) -> List[FileWithContent]:
   """Return a JSON string describing Java files with truncated contents.
 
              Each entry contains the relative path and the first 2000 characters of
@@ -13,11 +13,11 @@ def read_and_describe_files(parentFolder: str) -> List[FileWithContent]:
              content field is omitted.
              """
   files_info: List[FileWithContent] = []
-  for dirpath, _, filenames in os.walk(parentFolder):
-    rel_dir = os.path.relpath(dirpath, parentFolder)
+  for dirpath, _, filenames in os.walk(parent_folder):
+    rel_dir = os.path.relpath(dirpath, parent_folder)
     for filename in filenames:
       rel_path = os.path.join(rel_dir, filename)
-      abs_path = os.path.join(parentFolder, rel_path)
+      abs_path = os.path.join(parent_folder, rel_path)
       try:
         with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
           content = f.read(2000)

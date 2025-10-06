@@ -8,45 +8,24 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
-from typing_extensions import TypedDict, List
 
-from FileUtil import read_and_describe_files, write_to_files
-from models import FileWithContent, FilesWithContent, \
+from file_util import read_and_describe_files, write_to_files
+from models import FilesWithContent, \
   ValidationResult, MigrationState
 
 
 class MigrationAgent:
-  def __init__(self, java_project_path: str, python_project_path: str, max_validation_iteration:int=3):
+
+  def __init__(self, java_project_path: str, python_project_path: str, max_validation_iteration: int = 2):
     load_dotenv()
     os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
     self.java_project_path = java_project_path
     self.python_project_path = python_project_path
     self.max_validation_iteration = max_validation_iteration
-    self.gpt_4_llm = ChatOpenAI(model="gpt-4", temperature=0.0)
-    self.gpt_5_llm = ChatOpenAI(model="gpt-5", temperature=0.0)
     self.boolean_parser = BooleanOutputParser()
 
   def run(self) -> Iterator[dict[str, Any] | Any]:
-    workflow = StateGraph(MigrationState)
-    workflow.add_node("read_java_files", self.read_java_files)
-    workflow.add_node("validate_java_files", self.validate_java_files)
-    workflow.add_node("migrate_project", self.migrate_project)
-    workflow.add_node("validate_content_is_covered",
-                      self.validate_content_is_covered)
-    workflow.add_node("fix_python_files", self.fix_python_files)
-    workflow.add_node("write_python_files", self.write_python_files)
-
-    workflow.add_edge(START, "read_java_files")
-    workflow.add_edge("read_java_files", "validate_java_files")
-    workflow.add_conditional_edges("validate_java_files",
-                                   self.java_validation_passed,
-                                   {"end": END, "proceed": "migrate_project"})
-    workflow.add_edge("migrate_project", "validate_content_is_covered")
-    workflow.add_conditional_edges("validate_content_is_covered",
-                                   self.validation_passed, {"end": "write_python_files",
-                                                            "apply_fixes": "fix_python_files"})
-    workflow.add_edge("fix_python_files", "validate_content_is_covered")
-    workflow.add_edge("write_python_files", END)
+    workflow = self._create_workflow()
     graph = workflow.compile()
 
     migrationState = MigrationState(
@@ -56,20 +35,40 @@ class MigrationAgent:
 
     return graph.stream(migrationState)
 
+  def _create_workflow(self):
+    workflow = StateGraph(MigrationState)
+    workflow.add_node("read_java_files", self._read_java_files)
+    workflow.add_node("validate_java_files", self._validate_java_files)
+    workflow.add_node("migrate_project", self._migrate_project)
+    workflow.add_node("validate_content_is_covered",
+                      self._validate_content_is_covered)
+    workflow.add_node("fix_python_files", self._fix_python_files)
+    workflow.add_node("write_python_files", self._write_python_files)
+    workflow.add_edge(START, "read_java_files")
+    workflow.add_edge("read_java_files", "validate_java_files")
+    workflow.add_conditional_edges("validate_java_files",
+                                   self.java_validation_passed,
+                                   {"failed": END, "passed": "migrate_project"})
+    workflow.add_edge("migrate_project", "validate_content_is_covered")
+    workflow.add_conditional_edges("validate_content_is_covered",
+                                   self.validation_passed,
+                                   {"passed": "write_python_files",
+                                    "failed": "fix_python_files"})
+    workflow.add_edge("fix_python_files", "validate_content_is_covered")
+    workflow.add_edge("write_python_files", END)
+    return workflow
 
-  def read_java_files(self, migration_state: MigrationState) -> MigrationState:
-    """Read Java files from the specified project directory."""
+  def _read_java_files(self, migration_state: MigrationState) -> MigrationState:
     java_project_path = migration_state.get("java_project_path", "")
     if not java_project_path:
       raise ValueError("Java project path is not specified.")
 
-    # Placeholder for actual file reading logic
     java_files = read_and_describe_files(java_project_path)
 
     migration_state["java_files"] = java_files
     return migration_state
 
-  def validate_java_files(self,
+  def _validate_java_files(self,
       migration_state: MigrationState) -> MigrationState:
 
     system_msg = (
@@ -97,10 +96,11 @@ class MigrationAgent:
       ("system", system_msg),
       ("user", user_msg),
     ])
-    chain = prompt | self.gpt_4_llm | self.boolean_parser
+    chain = prompt | ChatOpenAI(model="gpt-4",
+                                temperature=0) | BooleanOutputParser()
     valid_java_project = chain.invoke(
         input={"java_files": migration_state.get("java_files")})
-    if (valid_java_project):
+    if valid_java_project:
       migration_state["valid_java_project"] = True
     else:
       migration_state["valid_java_project"] = False
@@ -109,22 +109,28 @@ class MigrationAgent:
         "migration_failed_reason"] = "Not a valid Java Spring Boot Maven project"
     return migration_state
 
-  def migrate_project(self, migration_state: MigrationState) -> MigrationState:
+  def _migrate_project(self, migration_state: MigrationState) -> MigrationState:
     migration_state["migration_status"] = "In Progress"
 
     system_msg = (
       "You are a code migration assistant. Your task is to rewrite a Java "
-      "Spring Boot application into a Python FastAPI application. You will be "
-      "given a list of Java source files with their contents. Generate an "
-      "equivalent Python project. For each output file, provide the relative path "
-      "under the project root and the full content of the file. Do not omit necessary files."
+      "Spring Boot application into an equivalent Python FastAPI application. "
+      "Preserve **all functionality and behavior** of the original system. "
+      "The Java project may have multiple layers (controllers, services, models, etc.); "
+      "it's acceptable to reorganize code in Python as long as the overall logic and features remain the same. "
+      "Ensure that **all controllers (endpoints)**, business logic, data models, scheduled tasks, validation rules, "
+      "and security mechanisms from the Java app are fully implemented in the FastAPI version. "
+      "If the Java app uses a database or JPA, set up an appropriate database layer in the FastAPI app (for example, use SQLAlchemy with a SQLite database for local usage, or an equivalent configuration) so the application can run without external dependencies. "
+      "Also include any supporting files needed to run the project (e.g., a requirements.txt for Python dependencies). "
+      "Your output should be a complete, runnable FastAPI project that an end-user could run on the first attempt. "
+      "Do not omit any necessary files or code. If the Java project includes tests or documentation, include corresponding tests (e.g., pytest) and update documentation (README, comments) to reflect the Python implementation."
     )
     user_msg = (
       "Java project files with content:"
       "\n{java_files}\n\n"
       "Produce a parsable valid JSON document with a key 'files'. 'files' should be a list of objects, "
-      "each with 'path' (relative to project root) and 'content' (the Python file content). "
-      "Only include Python and configuration files relevant to a FastAPI project."
+      "Ensure the code is **complete and syntactically correct**, with all required imports and definitions. "
+      "Only include files relevant to the FastAPI project (Python code, configuration, tests, docs)."
     )
     prompt = ChatPromptTemplate.from_messages([
       ("system", system_msg),
@@ -132,7 +138,7 @@ class MigrationAgent:
     ])
 
     parser = PydanticOutputParser(pydantic_object=FilesWithContent)
-    chain = prompt | self.gpt_5_llm | parser
+    chain = prompt | ChatOpenAI(model="gpt-5") | parser
 
     result = chain.invoke(
         input={"java_files": migration_state.get("java_files")})
@@ -140,7 +146,7 @@ class MigrationAgent:
     migration_state["migration_status"] = "Initially Migrated"
     return migration_state
 
-  def validate_content_is_covered(self,
+  def _validate_content_is_covered(self,
       migration_state: MigrationState) -> MigrationState:
     migration_state["migration_status"] = "Validation"
     migration_state["current_validation_count"] = migration_state.get(
@@ -149,51 +155,52 @@ class MigrationAgent:
     system_prompt = (
       "You are an experienced software migration auditor.\n"
       "Your role is to determine whether a Python FastAPI project fully preserves "
-      "the functional behavior and architecture of the original Java Spring Boot (Maven) application.\n"
-      "Apply practical, common-sense validation—do not flag stylistic or minor implementation differences.\n"
-      "The migration may restructure code across different files or modules; "
-      "this is acceptable as long as the overall behavior, logic, and feature set remain equivalent.\n"
+      "the functional behavior and architecture of the original Java Spring Boot application.\n"
+      "Apply practical, common-sense validation — do not flag stylistic or minor implementation differences.\n"
+      "The migration may restructure code across different files or modules; this is acceptable as long as the overall behavior, logic, and feature set remain **equivalent**.\n"
       "Evaluate whether:\n"
-      "- Application can run without errors or missing dependencies.\n"
-      "- All controllers, services, data models, scheduled jobs, validation rules, "
-      "and security mechanisms from the Java project are present and behave equivalently in the FastAPI version.\n"
-      "- The dependencies from the Java Maven project have been properly replaced, reimplemented, or adapted in Python.\n"
-      "- The FastAPI project includes tests that effectively verify the migrated functionality and key edge cases.\n"
-      "- Documentation (e.g., README, comments) has been updated to reflect the Python implementation and usage.\n"
-      "Judge equivalence from an end-user and system-integrator perspective: would the system function the same under typical operations?\n"
+      "- The application can run without errors or missing dependencies (all necessary imports, configs, and setups are present, e.g., database initialization is handled so the app starts up correctly).\n"
+      "- All controllers (endpoints), services (business logic), data models, scheduled jobs, validation rules, and security mechanisms from the Java project are present and behave equivalently in the FastAPI version.\n"
+      "- The dependencies from the Java Maven project have been properly replaced or adapted in Python (for example, database connections via Spring Data should be mirrored with a Python ORM or database client, scheduled tasks via @Scheduled should use an equivalent scheduler, etc.).\n"
+      "- The FastAPI project includes tests that effectively verify the migrated functionality and key edge cases (if tests were expected or included in migration).\n"
+      "- Documentation (e.g., README and relevant comments) has been updated to reflect the Python implementation and usage.\n"
+      "Judge equivalence from an end-user and system integrator perspective: would the system function the same under typical operations?\n"
       "Do NOT suggest minor code cleanups, stylistic tweaks, or micro-optimizations.\n"
-      
-      "Produce a parsable valid JSON document with a keys 'validation_status', 'validation_fix_instructions' and 'manual_fix_suggestion'"
-      "'validation_status' is a boolean field, True if the Python project fully covers the Java functionality, False otherwise. "
-      "'validation_six_instructions' is a list of strings, each string is a specific instruction to fix gaps in the migration. "
-      "'manual_fix_suggestion' string field that provides actionable advice for the user to manually fix the migration if this is the final validation iteration and it is not successful, empty string if no fixes needed"
-      "Only include Python and configuration files relevant to a FastAPI project."
+      "Take into account previous validation suggestions (if any) to be consistent in this iteration.\n\n"
+      "Produce a parsable JSON object with keys 'validation_status', 'validation_fix_instructions', and 'manual_fix_suggestion'.\n"
+      "- 'validation_status': a boolean that is True if the Python project fully covers the Java functionality, False otherwise.\n"
+      "- 'validation_fix_instructions': an array of strings, where each string is a specific instruction to fix a gap if the migration isn't equivalent. This should focus on functional gaps (e.g., \"Implement user authentication flow in FastAPI as in the Java app\").\n"
+      "- 'manual_fix_suggestion': a single string providing actionable advice for the user to manually fix the migration if this is the **final** validation attempt and it still fails. If no fixes are needed (or if not the final attempt), use an empty string here.\n"
+      "Ensure the response is only the JSON with these keys and nothing else."
     )
 
     user_prompt = (
       "Below is a JSON representation of a Java project and its migrated Python FastAPI project. "
-      "Each entry has a path and content. Check whether the Python project fully covers the functionality "
-      "of the Java project according to the criteria above and respond with a JSON object in the specified format:\n\n"
+      "Each entry has a path and content.\n\n"
       "{java_files}\n\n"
       "{python_files}\n\n"
-      "Final validation: {final_validation}"
+      "Final validation: {final_validation}\n"
+      "Previous validation fix instructions (if any): {previous_instructions}\n\n"
+      "Based on the criteria above, respond with the JSON object describing the validation result."
     )
 
-    final_validation = migration_state.get("current_validation_count",
-                                           0) >= migration_state.get(
-        "max_validation_count", 3)
+    final_validation = migration_state.get("current_validation_count", 0) >= migration_state.get("max_validation_count", 2)
+    if final_validation:
+      return migration_state
     prompt = ChatPromptTemplate.from_messages([
       ("system", system_prompt),
       ("user", user_prompt),
     ])
 
     parser = PydanticOutputParser(pydantic_object=ValidationResult)
-    chain = prompt | self.gpt_5_llm | parser
+    chain = prompt | ChatOpenAI(model="gpt-5") | parser
 
     result = chain.invoke(
         input={"java_files": migration_state.get("java_files"),
                "python_files": migration_state.get("python_files"),
-               "final_validation": final_validation},
+               "final_validation": final_validation,
+               "previous_instructions": migration_state.get(
+                   "validation_fix_instructions", [])},
     )
 
     migration_state["validation_status"] = result.validation_status
@@ -206,7 +213,8 @@ class MigrationAgent:
       migration_state["user_output_messages"] = output_messages
     return migration_state
 
-  def fix_python_files(self, migration_state: MigrationState) -> MigrationState:
+  def _fix_python_files(self,
+      migration_state: MigrationState) -> MigrationState:
     migration_state["migration_status"] = "Applying Fixes"
 
     system_msg = (
@@ -239,7 +247,7 @@ class MigrationAgent:
     ])
 
     parser = PydanticOutputParser(pydantic_object=FilesWithContent)
-    chain = prompt | self.gpt_4_llm | parser
+    chain = prompt | ChatOpenAI(model="gpt-5") | parser
 
     result = chain.invoke(
         input={
@@ -252,8 +260,8 @@ class MigrationAgent:
     migration_state["migration_status"] = "Fixes Applied"
     return migration_state
 
-  def write_python_files(self, migration_state: MigrationState) -> MigrationState:
-    """Write Python files to the specified output directory."""
+  def _write_python_files(self,
+      migration_state: MigrationState) -> MigrationState:
     python_project_path = migration_state.get("python_project_path", "")
 
     python_files = migration_state.get("python_files", [])
@@ -263,17 +271,15 @@ class MigrationAgent:
 
   def java_validation_passed(self, migration_state: MigrationState) -> str:
     if not migration_state.get("valid_java_project", False):
-      return "end"
-    return "proceed"
+      return "failed"
+    return "passed"
 
   def validation_passed(self, migration_state: MigrationState) -> str:
     if migration_state.get("validation_status", False):
-      return "end"
+      return "passed"
     else:
-      if migration_state.get("current_validation_count",
-                             0) >= migration_state.get("max_validation_count",
-                                                       3):
+      if migration_state.get("current_validation_count", 0) >= migration_state.get("max_validation_count", 2):
         migration_state["migration_status"] = "Partially Completed"
-        return "end"
+        return "passed"
       else:
-        return "apply_fixes"
+        return "failed"

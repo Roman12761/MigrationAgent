@@ -23,7 +23,7 @@ class MigrationState(TypedDict):
     python_project_path: str
     max_validation_count: int
     current_validation_count: int
-    migration_status: str  # "Pending", "In Progress", "Completed", "
+    migration_status: str
     migration_failed_reason: str
     valid_java_project: bool
     validation_status: bool
